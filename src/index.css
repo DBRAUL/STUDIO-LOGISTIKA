@@ -1,0 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;850&family=Syne:wght@400;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Syne", sans-serif;
+}
+
+/* Custom scrollbars inside navigations */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Keyframes animations for active roles */
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes viewFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-view-fade {
+  animation: viewFade 0.25s ease-out forwards;
+}
+
+/* Print stylesheets for Reports and PDF generation */
+@media print {
+  @page {
+    size: letter portrait;
+    margin: 12mm 10mm;
+  }
+
+  body {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    font-size: 11px !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  header,
+  nav,
+  footer,
+  .print\\:hidden,
+  button,
+  input,
+  select,
+  .sticky {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Override dark mode cards for white paper printing */
+  .bg-slate-950,
+  .bg-slate-900,
+  .bg-slate-850,
+  .bg-slate-800 {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #e2e8f0 !important;
+    box-shadow: none !important;
+  }
+
+  .text-slate-100,
+  .text-slate-200,
+  .text-slate-300 {
+    color: #0f172a !important;
+  }
+
+  .text-slate-400,
+  .text-slate-500 {
+    color: #475569 !important;
+  }
+
+  /* Ensure tables expand fully without scrolls */
+  .overflow-x-auto,
+  .max-h-\\[600px\\] {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+
+  th, td {
+    border-bottom: 1px solid #cbd5e1 !important;
+    padding: 6px 8px !important;
+  }
+
+  tr {
+    page-break-inside: avoid !important;
+  }
+}
