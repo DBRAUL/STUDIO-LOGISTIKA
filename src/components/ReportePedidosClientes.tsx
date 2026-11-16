@@ -18,8 +18,10 @@ import {
   Repeat,
   ShieldCheck
 } from 'lucide-react';
-import { formatedDisplayDate, formatedDisplayDateTime } from '../context/LogistikaContext';
+import { formatedDisplayDate, formatedDisplayDateTime, useLogistika } from '../context/LogistikaContext';
 import { DashboardGeneralOperaciones } from './DashboardGeneralOperaciones';
+import { computeDashboardMetrics, formatDurationHuman, formatHoursDecimal } from '../lib/dashboardMetrics';
+import { buildPdfChartsHtml } from '../lib/dashboardChartsSvg';
 
 interface Props {
   pedidosActivos: Pedido[];
@@ -32,6 +34,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
   historialEntregas,
   tiendas
 }) => {
+  const { logs } = useLogistika();
   // Filters
   const [origenDatos, setOrigenDatos] = useState<'TODOS' | 'ACTIVOS' | 'HISTORIAL'>('TODOS');
   const [filtroTienda, setFiltroTienda] = useState<string>('TODAS');
@@ -277,101 +280,40 @@ export const ReportePedidosClientes: React.FC<Props> = ({
     document.body.removeChild(link);
   };
 
-  // Dedicated 3-Page Executive Dashboard Print PDF generator (mirroring official document)
+  // Dedicated 4-Page Executive Dashboard Print PDF generator
   const handleImprimirDashboardPDF = () => {
-    // 1. Group data for the 5 sections
-    const totalRegistros = todosLosPedidos.length;
-    const entregados = todosLosPedidos.filter(p => p.estatus === 'FINALIZADO');
-    const enProceso = todosLosPedidos.filter(p => p.estatus !== 'FINALIZADO');
-    const pctEfectividad = totalRegistros > 0 ? ((entregados.length / totalRegistros) * 100).toFixed(1) : '0';
+    const metrics = computeDashboardMetrics(pedidosFiltrados, logs);
+    const {
+      totalRegistros,
+      entregados,
+      enProceso,
+      pctEfectividad,
+      clientesUnicosCount,
+      clientesRecurrentes,
+      tasaRecurrencia,
+      resumenSucursales,
+      resumenChoferes,
+      choferesCols,
+      matrizTiendaChofer,
+      tiemposGlobales,
+      mesesOrdenados,
+      matrizSucursalMes,
+      pedidosActivosEnRuta
+    } = metrics;
 
-    // Clients
-    const clientesMap = new Map<string, { cliente: string; telefonos: Set<string>; tiendas: Map<string, number>; tickets: string[]; total: number }>();
-    todosLosPedidos.forEach(p => {
-      const cliKey = (p.cliente || 'CLIENTE SIN NOMBRE').trim().toUpperCase();
-      if (!clientesMap.has(cliKey)) {
-        clientesMap.set(cliKey, { cliente: p.cliente || 'CLIENTE SIN NOMBRE', telefonos: new Set(), tiendas: new Map(), tickets: [], total: 0 });
-      }
-      const c = clientesMap.get(cliKey)!;
-      c.total++;
-      c.tickets.push(p.ticket);
-      if (p.tel) c.telefonos.add(p.tel.trim());
-      const tKey = p.tienda ? p.tienda.trim().toUpperCase() : 'SIN SUCURSAL';
-      c.tiendas.set(tKey, (c.tiendas.get(tKey) || 0) + 1);
+    const monthsKeys = matrizSucursalMes.months;
+    const matrizRows = matrizSucursalMes.dataRows;
+
+    const chartsHtml = buildPdfChartsHtml({
+      totalRegistros,
+      entregadosCount: entregados.length,
+      enProcesoCount: enProceso.length,
+      pctEfectividad,
+      tiemposGlobales,
+      resumenSucursales,
+      resumenChoferes,
+      mesesOrdenados
     });
-
-    const clientesUnicosCount = clientesMap.size;
-    const clientesRecurrentes = Array.from(clientesMap.values())
-      .filter(c => c.total >= 2)
-      .sort((a, b) => b.total - a.total);
-    const tasaRecurrencia = clientesUnicosCount > 0 ? ((clientesRecurrentes.length / clientesUnicosCount) * 100).toFixed(1) : '0';
-
-    // Section 1: Sucursales
-    const sucursalesMap = new Map<string, { tienda: string; total: number; finalizados: number; enProceso: number }>();
-    todosLosPedidos.forEach(p => {
-      const tKey = (p.tienda || 'SIN SUCURSAL').trim().toUpperCase();
-      if (!sucursalesMap.has(tKey)) sucursalesMap.set(tKey, { tienda: p.tienda || 'SIN SUCURSAL', total: 0, finalizados: 0, enProceso: 0 });
-      const s = sucursalesMap.get(tKey)!;
-      s.total++;
-      if (p.estatus === 'FINALIZADO') s.finalizados++;
-      else s.enProceso++;
-    });
-    const resumenSucursales = Array.from(sucursalesMap.values())
-      .map(s => ({ ...s, pct: totalRegistros > 0 ? ((s.total / totalRegistros) * 100).toFixed(1) : '0' }))
-      .sort((a, b) => b.total - a.total);
-
-    // Section 2: Choferes
-    const choferesMap = new Map<string, { chofer: string; asignados: number; entregados: number; pendientes: number }>();
-    todosLosPedidos.forEach(p => {
-      const chKey = p.chofer ? p.chofer.trim().toUpperCase() : 'SIN ASIGNAR / OTROS';
-      if (!choferesMap.has(chKey)) choferesMap.set(chKey, { chofer: p.chofer ? p.chofer.trim() : 'SIN ASIGNAR / OTROS', asignados: 0, entregados: 0, pendientes: 0 });
-      const ch = choferesMap.get(chKey)!;
-      ch.asignados++;
-      if (p.estatus === 'FINALIZADO') ch.entregados++;
-      else ch.pendientes++;
-    });
-    const resumenChoferes = Array.from(choferesMap.values())
-      .map(ch => ({ ...ch, pct: totalRegistros > 0 ? ((ch.asignados / totalRegistros) * 100).toFixed(1) : '0' }))
-      .sort((a, b) => b.asignados - a.asignados);
-
-    // Section 3: Meses
-    const mesesMap = new Map<string, { mesKey: string; nombreMes: string; procesados: number; finalizados: number; pendientes: number }>();
-    const nombresMes: { [k: string]: string } = {
-      '01': 'Enero', '02': 'Febrero', '03': 'Marzo', '04': 'Abril',
-      '05': 'Mayo', '06': 'Junio', '07': 'Julio', '08': 'Agosto',
-      '09': 'Septiembre', '10': 'Octubre', '11': 'Noviembre', '12': 'Diciembre'
-    };
-    todosLosPedidos.forEach(p => {
-      const f = p.fecha || p.dateenv || '';
-      let mKey = f.length >= 7 ? f.substring(0, 7) : '2026-11';
-      if (!mesesMap.has(mKey)) {
-        const [yyyy, mm] = mKey.split('-');
-        mesesMap.set(mKey, { mesKey: mKey, nombreMes: `${nombresMes[mm] || mm} ${yyyy}`, procesados: 0, finalizados: 0, pendientes: 0 });
-      }
-      const item = mesesMap.get(mKey)!;
-      item.procesados++;
-      if (p.estatus === 'FINALIZADO') item.finalizados++;
-      else item.pendientes++;
-    });
-    const mesesOrdenados = Array.from(mesesMap.values()).sort((a, b) => a.mesKey.localeCompare(b.mesKey));
-
-    // Section 3.1: Matriz Cruzada
-    const monthsKeys = mesesOrdenados.map(m => m.mesKey);
-    const matrizRows = resumenSucursales.map(s => {
-      const mCounts: { [m: string]: number } = {};
-      monthsKeys.forEach(m => { mCounts[m] = 0; });
-      todosLosPedidos.forEach(p => {
-        if ((p.tienda || '').toUpperCase() === s.tienda.toUpperCase()) {
-          const f = p.fecha || p.dateenv || '';
-          let mKey = f.length >= 7 ? f.substring(0, 7) : '2026-11';
-          if (mCounts[mKey] !== undefined) mCounts[mKey]++;
-        }
-      });
-      return { tienda: s.tienda, total: s.total, mCounts };
-    });
-
-    // Section 5: Activos en ruta
-    const pedidosActivos = todosLosPedidos.filter(p => p.estatus !== 'FINALIZADO');
 
     const printWin = window.open('', '_blank');
     if (!printWin) {
@@ -388,7 +330,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
         <style>
           @page {
             size: A4 portrait;
-            margin: 15mm 12mm 15mm 12mm;
+            margin: 14mm 12mm 14mm 12mm;
           }
           body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -396,14 +338,14 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             margin: 0;
             padding: 0;
             background: #fff;
-            font-size: 11px;
-            line-height: 1.4;
+            font-size: 10.5px;
+            line-height: 1.38;
           }
           .page-container {
             page-break-after: always;
             position: relative;
-            min-height: 250mm;
-            padding-bottom: 25px;
+            min-height: 254mm;
+            padding-bottom: 24px;
           }
           .page-container:last-child {
             page-break-after: auto;
@@ -412,10 +354,10 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            margin-bottom: 24px;
+            margin-bottom: 18px;
           }
           .tagline {
-            font-size: 11px;
+            font-size: 10.5px;
             font-weight: 800;
             text-transform: uppercase;
             color: #0284c7;
@@ -423,7 +365,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             margin-bottom: 4px;
           }
           h1 {
-            font-size: 26px;
+            font-size: 24px;
             font-weight: 900;
             margin: 0 0 6px 0;
             color: #0f172a;
@@ -431,14 +373,14 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             line-height: 1.15;
           }
           .subtitle {
-            font-size: 12px;
+            font-size: 11px;
             color: #475569;
             margin: 0;
             max-width: 460px;
           }
           .info-box {
             text-align: right;
-            font-size: 11px;
+            font-size: 10.5px;
             color: #334155;
             line-height: 1.4;
           }
@@ -447,72 +389,73 @@ export const ReportePedidosClientes: React.FC<Props> = ({
           }
           .kpi-row {
             display: flex;
-            gap: 12px;
-            margin-bottom: 24px;
+            gap: 10px;
+            margin-bottom: 20px;
           }
           .kpi-card {
             flex: 1;
             border: 1px solid #e2e8f0;
             border-left: 4px solid #0284c7;
             background: #f8fafc;
-            padding: 12px 14px;
+            padding: 10px 11px;
             border-radius: 4px;
           }
-          .kpi-card:nth-child(1) { border-left-color: #059669; }
-          .kpi-card:nth-child(2) { border-left-color: #d97706; }
-          .kpi-card:nth-child(3) { border-left-color: #2563eb; }
-          .kpi-card:nth-child(4) { border-left-color: #4f46e5; }
+          .kpi-card.c-emerald { border-left-color: #059669; }
+          .kpi-card.c-amber { border-left-color: #d97706; }
+          .kpi-card.c-cyan { border-left-color: #0891b2; }
+          .kpi-card.c-blue { border-left-color: #2563eb; }
+          .kpi-card.c-indigo { border-left-color: #4f46e5; }
           .kpi-title {
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 800;
             text-transform: uppercase;
             color: #475569;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.4px;
             margin-bottom: 4px;
           }
           .kpi-num {
-            font-size: 26px;
+            font-size: 21px;
             font-weight: 900;
             color: #0f172a;
-            line-height: 1;
-            margin-bottom: 4px;
+            line-height: 1.05;
+            margin-bottom: 3px;
           }
           .kpi-sub {
-            font-size: 10px;
+            font-size: 9px;
             color: #64748b;
           }
           h2 {
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 900;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             color: #1e3a8a;
-            margin: 20px 0 4px 0;
+            margin: 16px 0 4px 0;
           }
           .sec-desc {
-            font-size: 10.5px;
+            font-size: 10px;
             color: #475569;
-            margin: 0 0 10px 0;
+            margin: 0 0 8px 0;
           }
           table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 10.5px;
-            margin-bottom: 18px;
+            font-size: 10px;
+            margin-bottom: 14px;
           }
           th {
             background-color: #1e3a8a;
             color: #ffffff;
             font-weight: 800;
             text-align: left;
-            padding: 8px 10px;
+            padding: 6px 8px;
             text-transform: uppercase;
-            font-size: 9.5px;
-            letter-spacing: 0.5px;
+            font-size: 8.5px;
+            letter-spacing: 0.4px;
             border: 1px solid #1e3a8a;
           }
           td {
-            padding: 7px 10px;
+            padding: 6px 8px;
             border: 1px solid #cbd5e1;
           }
           tr:nth-child(even) td {
@@ -523,11 +466,35 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             font-weight: 800;
             border-top: 2px solid #94a3b8;
           }
+          .two-col {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+          }
+          .two-col > div {
+            flex: 1;
+          }
+          .sub-title-bar {
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            color: #0f172a;
+            background: #e2e8f0;
+            padding: 5px 8px;
+            border-radius: 3px 3px 0 0;
+            border: 1px solid #cbd5e1;
+            border-bottom: none;
+          }
+          .cell-active {
+            background: #ccfbf1 !important;
+            color: #0f766e;
+            font-weight: 800;
+          }
           .badge {
             display: inline-block;
-            padding: 2px 8px;
+            padding: 2px 7px;
             border-radius: 4px;
-            font-size: 9px;
+            font-size: 8.5px;
             font-weight: 800;
             text-transform: uppercase;
           }
@@ -542,20 +509,20 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             left: 0;
             right: 0;
             border-top: 1px solid #e2e8f0;
-            padding-top: 8px;
+            padding-top: 7px;
             display: flex;
             justify-content: space-between;
-            font-size: 9.5px;
+            font-size: 9px;
             color: #94a3b8;
           }
           .note-box {
             background: #eff6ff;
             border-left: 4px solid #2563eb;
             padding: 10px 14px;
-            font-size: 10.5px;
+            font-size: 10px;
             color: #1e3a8a;
             border-radius: 0 4px 4px 0;
-            margin-top: 14px;
+            margin-top: 12px;
           }
         </style>
       </head>
@@ -566,48 +533,70 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             <div>
               <div class="tagline">REPORTES DE LOGISTIKA</div>
               <h1>Dashboard General de Pedidos y<br/>Operaciones</h1>
-              <p class="subtitle">Análisis Integral de Carga de Trabajo, Operadores, Sucursales y Recurrencia de Clientes</p>
+              <p class="subtitle">Análisis Integral de Carga de Trabajo, Cruce Tienda vs Choferes, Tiempos de Entrega y Recurrencia</p>
             </div>
             <div class="info-box">
-              <div>Periodo: <strong>Jun - Nov 2026</strong></div>
+              <div>Filtro Tienda: <strong>${filtroTienda === 'TODAS' ? 'Todas' : filtroTienda}</strong></div>
               <div>Total Pedidos: <strong>${totalRegistros} registros</strong></div>
               <div>Fecha Emisión: <strong>${new Date().toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })}</strong></div>
             </div>
           </div>
 
           <div class="kpi-row">
-            <div class="kpi-card">
-              <div class="kpi-title">PEDIDOS ENTREGADOS</div>
+            <div class="kpi-card c-emerald">
+              <div class="kpi-title">ENTREGADOS</div>
               <div class="kpi-num">${entregados.length}</div>
-              <div class="kpi-sub">${pctEfectividad}% Efectividad Operativa</div>
+              <div class="kpi-sub">${pctEfectividad}% Efectividad</div>
             </div>
-            <div class="kpi-card">
-              <div class="kpi-title">PEDIDOS PENDIENTES</div>
+            <div class="kpi-card c-amber">
+              <div class="kpi-title">PENDIENTES</div>
               <div class="kpi-num" style="color: #d97706;">${enProceso.length}</div>
-              <div class="kpi-sub">En Ruta, Cargado o Programado</div>
+              <div class="kpi-sub">En Ruta / Prog.</div>
             </div>
-            <div class="kpi-card">
-              <div class="kpi-title">CARTERA DE CLIENTES</div>
+            <div class="kpi-card c-cyan">
+              <div class="kpi-title">PROM. ENTREGA</div>
+              <div class="kpi-num" style="color: #0891b2;">${formatDurationHuman(tiemposGlobales.promedioMs)}</div>
+              <div class="kpi-sub">${tiemposGlobales.medidos} medidos (${tiemposGlobales.en24hPct}% ≤24h)</div>
+            </div>
+            <div class="kpi-card c-blue">
+              <div class="kpi-title">CARTERA CLIENTES</div>
               <div class="kpi-num">${clientesUnicosCount}</div>
-              <div class="kpi-sub">Clientes Únicos Registrados</div>
+              <div class="kpi-sub">Clientes Únicos</div>
             </div>
-            <div class="kpi-card">
-              <div class="kpi-title">TASA RECURRENCIA</div>
+            <div class="kpi-card c-indigo">
+              <div class="kpi-title">RECURRENCIA</div>
               <div class="kpi-num" style="color: #4f46e5;">${tasaRecurrencia}%</div>
-              <div class="kpi-sub">${clientesRecurrentes.length} Clientes (&gt;1 Compra)</div>
+              <div class="kpi-sub">${clientesRecurrentes.length} (&gt;1 compra)</div>
             </div>
           </div>
 
+          <h2>ANÁLISIS VISUAL DE KPIs OPERATIVOS</h2>
+          <p class="sec-desc">Gráficas consolidadas de volumen por tienda, carga de trabajo por chofer, tendencia mensual y cumplimiento en tiempo.</p>
+          ${chartsHtml}
+
+          <div class="note-box" style="margin-top: 8px;">
+            <strong>Resumen Ejecutivo:</strong> Se han analizado <strong>${totalRegistros}</strong> pedidos con una efectividad de entrega del <strong>${pctEfectividad}%</strong> y un tiempo promedio de entrega (CARGADO → FINALIZADO) de <strong>${formatDurationHuman(tiemposGlobales.promedioMs)}</strong>.
+          </div>
+
+          <div class="footer-bar">
+            <span>Reportes de Logistika — Consolidado de Pedidos y Operaciones</span>
+            <span>Página 1 de 4</span>
+          </div>
+        </div>
+
+        <!-- ==================== PÁGINA 2 ==================== -->
+        <div class="page-container">
           <h2>1. RESUMEN OPERATIVO POR SUCURSAL Y PUNTO DE ORIGEN</h2>
-          <p class="sec-desc">Distribución total del volumen de pedidos solicitados a través de las tiendas origen durante el periodo auditado.</p>
+          <p class="sec-desc">Distribución del volumen de pedidos solicitados y tiempo promedio de entrega desde su carga en tienda.</p>
           <table>
             <thead>
               <tr>
                 <th>TIENDA / SUCURSAL ORIGEN</th>
-                <th style="text-align: center;">PEDIDOS TOTALES</th>
+                <th style="text-align: center;">TOTALES</th>
                 <th style="text-align: center;">FINALIZADOS</th>
                 <th style="text-align: center;">EN PROCESO</th>
-                <th style="text-align: right;">% PARTICIPACIÓN</th>
+                <th style="text-align: center;">T. PROM. ENTREGA</th>
+                <th style="text-align: right;">% PART.</th>
               </tr>
             </thead>
             <tbody>
@@ -617,6 +606,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                   <td style="text-align: center; font-weight: bold;">${s.total}</td>
                   <td style="text-align: center; color: #059669; font-weight: bold;">${s.finalizados}</td>
                   <td style="text-align: center; color: #d97706; font-weight: bold;">${s.enProceso}</td>
+                  <td style="text-align: center; color: #0891b2; font-weight: bold;">${formatDurationHuman(s.tiempos.promedioMs)}</td>
                   <td style="text-align: right; font-weight: bold;">${s.pct}%</td>
                 </tr>
               `).join('')}
@@ -627,21 +617,23 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                 <td style="text-align: center;">${totalRegistros}</td>
                 <td style="text-align: center; color: #059669;">${entregados.length}</td>
                 <td style="text-align: center; color: #d97706;">${enProceso.length}</td>
+                <td style="text-align: center; color: #0891b2;">${formatDurationHuman(tiemposGlobales.promedioMs)}</td>
                 <td style="text-align: right;">100.0%</td>
               </tr>
             </tfoot>
           </table>
 
           <h2>2. DESEMPEÑO Y CARGA DE TRABAJO POR OPERADOR (CHOFER)</h2>
-          <p class="sec-desc">Distribución de entregas asignadas y nivel de cumplimiento por cada chofer de la plantilla operativa.</p>
+          <p class="sec-desc">Distribución de entregas asignadas, cumplimiento y tiempo promedio de entrega por cada chofer.</p>
           <table>
             <thead>
               <tr>
                 <th>OPERADOR / CHOFER</th>
                 <th style="text-align: center;">ASIGNADOS</th>
                 <th style="text-align: center;">ENTREGADOS</th>
-                <th style="text-align: center;">EN RUTA / PENDIENTES</th>
-                <th style="text-align: right;">% CARGA OPERATIVA</th>
+                <th style="text-align: center;">EN RUTA / PEND.</th>
+                <th style="text-align: center;">T. PROM. ENTREGA</th>
+                <th style="text-align: right;">% CARGA</th>
               </tr>
             </thead>
             <tbody>
@@ -651,6 +643,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                   <td style="text-align: center; font-weight: bold;">${ch.asignados}</td>
                   <td style="text-align: center; color: #059669; font-weight: bold;">${ch.entregados}</td>
                   <td style="text-align: center; color: #d97706; font-weight: bold;">${ch.pendientes}</td>
+                  <td style="text-align: center; color: #0891b2; font-weight: bold;">${formatDurationHuman(ch.tiempos.promedioMs)}</td>
                   <td style="text-align: right; font-weight: bold;">${ch.pct}%</td>
                 </tr>
               `).join('')}
@@ -661,19 +654,127 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                 <td style="text-align: center;">${totalRegistros}</td>
                 <td style="text-align: center; color: #059669;">${entregados.length}</td>
                 <td style="text-align: center; color: #d97706;">${enProceso.length}</td>
+                <td style="text-align: center; color: #0891b2;">${formatDurationHuman(tiemposGlobales.promedioMs)}</td>
                 <td style="text-align: right;">100.0%</td>
+              </tr>
+            </tfoot>
+          </table>
+
+          <h2>2.1 MATRIZ CRUZADA: TIENDA VS CHOFERES</h2>
+          <p class="sec-desc">Cruce detallado de pedidos atendidos por cada chofer según la sucursal o tienda que generó el pedido.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>TIENDA / SUCURSAL</th>
+                ${choferesCols.map(col => `<th style="text-align: center;">${col.label}</th>`).join('')}
+                <th style="text-align: right;">TOTAL TIENDA</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${matrizTiendaChofer.map(row => `
+                <tr>
+                  <td><strong>${row.tienda}</strong></td>
+                  ${choferesCols.map(col => {
+                    const cnt = row.choferCounts[col.key] || 0;
+                    return `<td style="text-align: center;" class="${cnt > 0 ? 'cell-active' : ''}">${cnt}</td>`;
+                  }).join('')}
+                  <td style="text-align: right; font-weight: 800;">${row.total}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>TOTAL POR CHOFER</td>
+                ${choferesCols.map(col => `<td style="text-align: center; color: #0f766e;">${col.total}</td>`).join('')}
+                <td style="text-align: right;">${totalRegistros}</td>
               </tr>
             </tfoot>
           </table>
 
           <div class="footer-bar">
             <span>Reportes de Logistika — Consolidado de Pedidos y Operaciones</span>
-            <span>Página 1 de 3</span>
+            <span>Página 2 de 4</span>
           </div>
         </div>
 
-        <!-- ==================== PÁGINA 2 ==================== -->
+        <!-- ==================== PÁGINA 3 ==================== -->
         <div class="page-container">
+          <h2>2.2 PROMEDIO DE TIEMPOS DE ENTREGA (CARGADO → FINALIZADO)</h2>
+          <p class="sec-desc">Medición del tiempo transcurrido desde que la tienda registra el pedido (fecha CARGADO) hasta la entrega al cliente (fecha FINALIZADO).</p>
+
+          <div class="kpi-row" style="margin-bottom: 12px;">
+            <div class="kpi-card c-cyan">
+              <div class="kpi-title">PROMEDIO GLOBAL</div>
+              <div class="kpi-num" style="color: #0891b2;">${formatDurationHuman(tiemposGlobales.promedioMs)}</div>
+              <div class="kpi-sub">${formatHoursDecimal(tiemposGlobales.promedioMs)}</div>
+            </div>
+            <div class="kpi-card c-emerald">
+              <div class="kpi-title">ENTREGAS ≤ 24 HRS</div>
+              <div class="kpi-num" style="color: #059669;">${tiemposGlobales.medidos > 0 ? `${tiemposGlobales.en24hPct}%` : '—'}</div>
+              <div class="kpi-sub">${tiemposGlobales.en24hCount} de ${tiemposGlobales.medidos} pedidos</div>
+            </div>
+            <div class="kpi-card c-blue">
+              <div class="kpi-title">ENTREGA MÁS RÁPIDA</div>
+              <div class="kpi-num">${formatDurationHuman(tiemposGlobales.minMs)}</div>
+              <div class="kpi-sub">Mínimo registrado</div>
+            </div>
+            <div class="kpi-card c-amber">
+              <div class="kpi-title">TIEMPO MÁXIMO</div>
+              <div class="kpi-num" style="color: #d97706;">${formatDurationHuman(tiemposGlobales.maxMs)}</div>
+              <div class="kpi-sub">Máximo registrado</div>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <div class="sub-title-bar">Tiempos Promedio por Tienda / Sucursal</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>TIENDA</th>
+                    <th style="text-align: center;">MED.</th>
+                    <th style="text-align: center;">PROMEDIO</th>
+                    <th style="text-align: right;">≤ 24H</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${resumenSucursales.map(s => `
+                    <tr>
+                      <td><strong>${s.tienda}</strong></td>
+                      <td style="text-align: center;">${s.tiempos.medidos}</td>
+                      <td style="text-align: center; font-weight: bold; color: #0891b2;">${formatDurationHuman(s.tiempos.promedioMs)}</td>
+                      <td style="text-align: right; color: #059669; font-weight: bold;">${s.tiempos.medidos > 0 ? `${s.tiempos.en24hPct}%` : '—'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+
+            <div>
+              <div class="sub-title-bar">Tiempos Promedio por Operador / Chofer</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>CHOFER</th>
+                    <th style="text-align: center;">MED.</th>
+                    <th style="text-align: center;">PROMEDIO</th>
+                    <th style="text-align: right;">≤ 24H</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${resumenChoferes.map(ch => `
+                    <tr>
+                      <td><strong>${ch.chofer}</strong></td>
+                      <td style="text-align: center;">${ch.tiempos.medidos}</td>
+                      <td style="text-align: center; font-weight: bold; color: #0891b2;">${formatDurationHuman(ch.tiempos.promedioMs)}</td>
+                      <td style="text-align: right; color: #059669; font-weight: bold;">${ch.tiempos.medidos > 0 ? `${ch.tiempos.en24hPct}%` : '—'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <h2>3. COMPORTAMIENTO Y TENDENCIA MENSUAL DE ENTREGAS</h2>
           <table>
             <thead>
@@ -730,7 +831,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                 <tr>
                   <td><strong>${r.tienda}</strong></td>
                   ${monthsKeys.map(m => `
-                    <td style="text-align: center;">${r.mCounts[m] > 0 ? r.mCounts[m] : 0}</td>
+                    <td style="text-align: center;">${r.monthCounts[m] > 0 ? r.monthCounts[m] : 0}</td>
                   `).join('')}
                   <td style="text-align: right; font-weight: bold;">${r.total}</td>
                 </tr>
@@ -740,7 +841,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
               <tr>
                 <td>TOTAL MENSUAL</td>
                 ${monthsKeys.map(m => {
-                  const s = matrizRows.reduce((acc, r) => acc + (r.mCounts[m] || 0), 0);
+                  const s = matrizRows.reduce((acc, r) => acc + (r.monthCounts[m] || 0), 0);
                   return `<td style="text-align: center;">${s}</td>`;
                 }).join('')}
                 <td style="text-align: right;">${totalRegistros}</td>
@@ -748,6 +849,14 @@ export const ReportePedidosClientes: React.FC<Props> = ({
             </tfoot>
           </table>
 
+          <div class="footer-bar">
+            <span>Reportes de Logistika — Consolidado de Pedidos y Operaciones</span>
+            <span>Página 3 de 4</span>
+          </div>
+        </div>
+
+        <!-- ==================== PÁGINA 4 ==================== -->
+        <div class="page-container">
           <h2>4. DIRECTORIO DE CLIENTES RECURRENTES Y TELÉFONOS DE CONTACTO</h2>
           <p class="sec-desc">Clientes clave con 2 o más compras registradas en el periodo. Representan el volumen de mayor fidelidad de la empresa.</p>
           <table>
@@ -761,7 +870,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
               </tr>
             </thead>
             <tbody>
-              ${clientesRecurrentes.slice(0, 8).map(c => {
+              ${clientesRecurrentes.slice(0, 10).map(c => {
                 let mainStore = 'VARIAS';
                 let maxC = 0;
                 c.tiendas.forEach((cnt, s) => { if (cnt > maxC) { maxC = cnt; mainStore = s; } });
@@ -779,51 +888,13 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                   </tr>
                 `;
               }).join('')}
+              ${clientesRecurrentes.length === 0 ? `
+                <tr>
+                  <td colspan="5" style="text-align: center; color: #64748b; padding: 12px;">No se encontraron clientes recurrentes en el filtro seleccionado.</td>
+                </tr>
+              ` : ''}
             </tbody>
           </table>
-
-          <div class="footer-bar">
-            <span>Reportes de Logistika — Consolidado de Pedidos y Operaciones</span>
-            <span>Página 2 de 3</span>
-          </div>
-        </div>
-
-        <!-- ==================== PÁGINA 3 ==================== -->
-        <div class="page-container">
-          <!-- Continua clientes recurrentes si hay más de 8 -->
-          ${clientesRecurrentes.length > 8 ? `
-            <table>
-              <thead>
-                <tr>
-                  <th>NOMBRE DEL CLIENTE</th>
-                  <th>TELÉFONO DE CONTACTO</th>
-                  <th style="text-align: center;">PEDIDOS</th>
-                  <th>SUCURSAL PRINCIPAL</th>
-                  <th style="text-align: center;">ESTATUS RECURRENCIA</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${clientesRecurrentes.slice(8, 16).map(c => {
-                  let mainStore = 'VARIAS';
-                  let maxC = 0;
-                  c.tiendas.forEach((cnt, s) => { if (cnt > maxC) { maxC = cnt; mainStore = s; } });
-                  const tel = Array.from(c.telefonos).join(' / ') || 'Sin teléfono';
-                  const isTop = c.total >= 4;
-                  return `
-                    <tr>
-                      <td><strong>${c.cliente}</strong></td>
-                      <td>${tel}</td>
-                      <td style="text-align: center; font-weight: bold;">${c.total}</td>
-                      <td>${mainStore}</td>
-                      <td style="text-align: center;">
-                        <span class="badge ${isTop ? 'badge-top' : 'badge-rec'}">${isTop ? 'Top Frecuente' : 'Recurrente'}</span>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          ` : ''}
 
           <h2>5. MONITOREO DE PEDIDOS ACTIVOS Y EN RUTA</h2>
           <p class="sec-desc">Detalle de entregas actualmente en proceso de transporte o programación.</p>
@@ -838,7 +909,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
               </tr>
             </thead>
             <tbody>
-              ${pedidosActivos.slice(0, 10).map(p => `
+              ${pedidosActivosEnRuta.slice(0, 10).map(p => `
                 <tr>
                   <td><strong>#${p.ticket}</strong></td>
                   <td>${p.cliente}</td>
@@ -851,7 +922,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
                   </td>
                 </tr>
               `).join('')}
-              ${pedidosActivos.length === 0 ? `
+              ${pedidosActivosEnRuta.length === 0 ? `
                 <tr>
                   <td colspan="5" style="text-align: center; color: #64748b; padding: 16px;">No hay pedidos pendientes en proceso actualmente.</td>
                 </tr>
@@ -860,12 +931,12 @@ export const ReportePedidosClientes: React.FC<Props> = ({
           </table>
 
           <div class="note-box">
-            <strong>Nota Operativa:</strong> Este dashboard consolida ${totalRegistros} registros extraídos directamente de la base de datos de pedidos y entregas. Los datos de recurrencia y teléfonos permiten ejecutar acciones inmediatas de venta y fidelización.
+            <strong>Nota Operativa:</strong> Este dashboard consolida ${totalRegistros} registros extraídos de la base de datos de pedidos y entregas, incluyendo gráficas vectoriales KPI, el cruce Tienda vs Choferes y tiempos promedio de entrega (CARGADO → FINALIZADO) medidos sobre ${tiemposGlobales.medidos} pedidos finalizados.
           </div>
 
           <div class="footer-bar">
             <span>Reportes de Logistika — Consolidado de Pedidos y Operaciones</span>
-            <span>Página 3 de 3</span>
+            <span>Página 4 de 4</span>
           </div>
         </div>
 
@@ -1403,6 +1474,7 @@ export const ReportePedidosClientes: React.FC<Props> = ({
         <DashboardGeneralOperaciones
           pedidos={pedidosFiltrados}
           tiendas={tiendas}
+          logs={logs}
           onPrintDashboard={handleImprimirDashboardPDF}
         />
       )}
